@@ -1,0 +1,14 @@
+{
+  "0x4268": {
+    "rpc": "https://ethereum-holesky.publicnode.com/",
+    "blockExplorer": "https://holesky.etherscan.io",
+    "name": "Holesky Testnet",
+    "nativeCurrency": {
+      "name": "ETH",
+      "symbol": "ETH",
+      "decimals": 18
+    },
+    "isTest": true,
+    "VerificationV2": "0xf35ef37160b2e5e48859cfd0dc63c621d5aab1f8"
+  }
+}
