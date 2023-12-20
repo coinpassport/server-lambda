@@ -9,6 +9,18 @@
       "decimals": 18
     },
     "isTest": true,
-    "VerificationV2": "0xf35ef37160b2e5e48859cfd0dc63c621d5aab1f8"
+    "VerificationV2": "0x7ad8f110ff586d5f8079cb2253ea057be847e5ce"
+  },
+  "0x13881": {
+    "rpc": "https://rpc.ankr.com/polygon_mumbai",
+    "blockExplorer": "https://mumbai.polygonscan.com",
+    "name": "Mumbai Testnet",
+    "nativeCurrency": {
+      "name": "MATIC",
+      "symbol": "MATIC",
+      "decimals": 18
+    },
+    "isTest": true,
+    "VerificationV2": "0xeded09fea28c8a21c69007019f31147df3a4180f"
   }
 }
