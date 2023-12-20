@@ -4,11 +4,12 @@ const AWS = require('aws-sdk');
 const Web3 = require('web3');
 const Stripe = require('stripe');
 
+
 const abi = require('./VerificationV2.json');
 const chains = require('./chains.json');
 
 const Bucket = 'coinpassportv2.test';
-const return_url = 'http://localhost:3000/';
+const return_url = 'http://localhost:3000/app';
 
 const s3 = new AWS.S3({apiVersion: '2006-03-01'});
 const stripeTest = Stripe(process.env.STRIPE_SECRET);
@@ -53,7 +54,7 @@ exports.handler = async (event) => {
 
     switch(event.requestContext.http.path) {
         case '/verify': {
-            feePaidBlock = await contract.methods.feePaidBlock(request.account).call();
+            feePaidBlock = String(await contract.methods.feePaidBlock(request.account).call());
             if(feePaidBlock === '0') return {
                 statusCode: 400,
                 body: JSON.stringify({ error: 'Must pay fee first' }),
@@ -64,7 +65,7 @@ exports.handler = async (event) => {
                 statusCode: 400,
                 body: JSON.stringify({ error: 'Nonce not unique' }),
             };
-            const recovered = web3.eth.accounts.recover(feePaidBlock + '\n\n' + request.nonce, request.signature).toLowerCase();
+            const recovered = web3.eth.accounts.recover('Paid Fee on Block #' + feePaidBlock + '\n\n' + request.nonce, request.signature).toLowerCase();
             if(recovered !== request.account) return {
                 statusCode: 400,
                 body: JSON.stringify({ error: 'Invalid signature provided' }),
@@ -149,7 +150,6 @@ exports.handler = async (event) => {
               verificationAllowed,
               status: null,
               exists: !!existingRow,
-              redacted: null,
               signature: null,
               expiration: null,
               idHash: null,
@@ -167,11 +167,13 @@ exports.handler = async (event) => {
               out.expiration = Number(existingRow.expiration);
               out.idHash = await saltHash(web3, existingRow.idHash);
               const hash = web3.utils.keccak256(web3.eth.abi.encodeParameters(
-                [ 'address', 'bytes32' ],
+                [ 'address', 'uint256', 'bytes32' ],
                 [ request.account,
+                  out.expiration,
                   out.idHash ]
               ));
               out.signature = web3.eth.accounts.sign(hash, '0x' + signerPrivate).signature;
+
               return out;
             } else if(out.status !== 'canceled') {
               // rate limiting for this query since it's on a public POST route
@@ -192,21 +194,18 @@ exports.handler = async (event) => {
                   verificationSession.last_verification_report,
                   { expand: [
                       'document.expiration_date',
-                      'document.number',
-                      'document.dob'
+                      'document.number'
                     ] }
                 );
+
                 const expirationDate = new Date(
                   verificationReport.document.expiration_date.year,
                   verificationReport.document.expiration_date.month - 1,
                   verificationReport.document.expiration_date.day
                 );
-                const dobDate = new Date(
-                  verificationReport.document.dob.year,
-                  verificationReport.document.dob.month - 1,
-                  verificationReport.document.dob.day
-                );
                 out.expiration = Math.floor(expirationDate.getTime() / 1000);
+                // discrete expirations every 2 weeks (in seconds) for better privacy
+                out.expiration = out.expiration - (out.expiration % 1209600);
                 const rawidHash = web3.utils.keccak256(
                   verificationReport.document.issuing_country +
                   verificationReport.document.number +
@@ -214,21 +213,23 @@ exports.handler = async (event) => {
                 );
                 out.idHash = await saltHash(web3, rawidHash);
                 const hash = web3.utils.keccak256(web3.eth.abi.encodeParameters(
-                  [ 'address', 'bytes32' ],
+                  [ 'address', 'uint256', 'bytes32' ],
                   [ request.account,
+                    out.expiration,
                     out.idHash ]
                 ));
                 out.signature = web3.eth.accounts.sign(hash, signerPrivate).signature;
-                
-                
+
                 await updateRow({
                     vsstatus: verificationSession.status,
                     vsreport: verificationSession.last_verification_report,
                     expiration: out.expiration,
-                    idHash: rawidHash,
-                    personal_dob: dobDate,
-                    personal_country: verificationReport.document.issuing_country
+                    idHash: rawidHash
                 });
+                
+                // We've got what we need
+                await stripe.identity.verificationSessions.redact(existingRow.vsid);
+                
               } else if(verificationSession.status !== existingRow.vsstatus) {
                 await updateRow({
                     vsstatus: verificationSession.status,
@@ -237,95 +238,7 @@ exports.handler = async (event) => {
               return out;
             }
         }
-        case '/fetch-personal-data': {
-            const registerNonce = await noncer(request);
-            if(registerNonce === null) return {
-                statusCode: 400,
-                body: JSON.stringify({ error: 'Nonce not unique' }),
-            };
-            const recovered = web3.eth.accounts.recover('Fetch Personal Data\n\n' + request.nonce, request.signature).toLowerCase();
-            if(recovered !== request.account) return {
-                statusCode: 400,
-                body: JSON.stringify({ error: 'Invalid signature provided' }),
-            };
-            await registerNonce();
-            
-            let newest;
-            for(const chain of Object.keys(accountRecords)) {
-                const row = accountRecords[chain][0]; // Sorted newest first
-                if(!newest || row.lastModified > newest) {
-                    const fetched = await row.fetch();
-                    if(fetched.vsstatus === 'verified' && !fetched.redacted) {
-                        newest = row.lastModified;
-                        existingRow = fetched;
-                    }
-                }
-            }
-            
-            if(!existingRow) return {
-                statusCode: 404,
-                body: JSON.stringify({ error: 'No personal data found' }),
-            };
-            
-            const dob = new Date(existingRow.personal_dob);
-            const over18 =
-                new Date(dob.getFullYear() + 18, dob.getMonth(), dob.getDate()) <= new Date();
-            const over18Hash = web3.utils.keccak256(web3.eth.abi.encodeParameters(
-                ['address', 'string'], [recovered, over18 ? 'over18' : 'notOver18']));
-            const over18Signature = web3.eth.accounts.sign(over18Hash, '0x' + process.env.SIGNER_PRIVATE).signature;
-            const over21 =
-                new Date(dob.getFullYear() + 21, dob.getMonth(), dob.getDate()) <= new Date();
-            const over21Hash = web3.utils.keccak256(web3.eth.abi.encodeParameters(
-                ['address', 'string'], [recovered, over21 ? 'over21' : 'notOver21']));
-            const over21Signature = web3.eth.accounts.sign(over21Hash, '0x' + process.env.SIGNER_PRIVATE).signature;
-            
-            const countryCode = existingRow.personal_country;
-            if(countryCode.length !== 2) return {
-                statusCode: 500,
-                body: JSON.stringify({ error: 'Country code error!' }),
-            };
-            // translate country code to an integer for more efficient gas
-            const countryCodeInt = (countryCode.charCodeAt(0) << 16) + countryCode.charCodeAt(1);
-            const countryHash = web3.utils.keccak256(web3.eth.abi.encodeParameters(
-                ['address', 'uint'], [recovered, countryCodeInt]));
-            const countrySignature = web3.eth.accounts.sign(countryHash, '0x' + process.env.SIGNER_PRIVATE).signature;
-            return { over18, over18Signature, over21, over21Signature, countryCodeInt, countrySignature };
-        }
-        case '/redact-personal-data': {
-            const registerNonce = await noncer(request);
-            if(registerNonce === null) return {
-                statusCode: 400,
-                body: JSON.stringify({ error: 'Nonce not unique' }),
-            };
-            const recovered = web3.eth.accounts.recover('Redact Personal Data\n\n' + request.nonce, request.signature).toLowerCase();
-            if(recovered !== request.account) return {
-                statusCode: 400,
-                body: JSON.stringify({ error: 'Invalid signature provided' }),
-            };
-            await registerNonce();
-            
-            for(const chain of Object.keys(accountRecords)) {
-                for(const row of accountRecords[chain]) {
-                    // Update row uses global values
-                    feePaidBlock = row.feePaidBlock;
-                    existingRow = await row.fetch();
-                    await updateRow({
-                        personal_country: null,
-                        personal_dob: null,
-                        idHash: null,
-                        expiration: null,
-                        redacted: true,
-                    }, chain);
-                }
-            }
-            
-            return {
-                statusCode: 200,
-                body: JSON.stringify({
-                    ok: true
-                }),
-            };
-        }
+
     }
 
     return {
@@ -335,6 +248,21 @@ exports.handler = async (event) => {
         }),
     };
 };
+
+function buffer2bits(buff) {
+    const res = [];
+    for (let i=0; i<buff.length; i++) {
+        for (let j=0; j<8; j++) {
+            if ((buff[i]>>j)&1) {
+                res.push('1');
+            } else {
+                res.push('0');
+            }
+        }
+    }
+    return res;
+}
+
 
 async function noncer(request) {
     try {
